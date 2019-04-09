@@ -1,0 +1,261 @@
+====================================================================
+      Remarks for MuseScore Version 3
+      design goals/changes
+====================================================================
+
+- Optimize horizontal layout by allowing overlapping segments.
+      - Compute an outline (Shape) for every Staff/Segment.
+      - Use the outline to compute the minimum distance between Segments.
+            - this also avoids collisions between Lyrics and ChordNames
+
+- Automatically increase vertical space between staves to avoid collisions.
+      - Use the segment shapes to compute the minimum distance between staves.
+        Use the minimum distance if its bigger than the style distance;
+
+- Implement a way to (re-)layout only the modified part of the score.
+  A reorganization of layout is needed for this. Layout should work in one pass in
+  an incremental way.
+  The pattern to trigger incremental layout is:
+            score->startCmd();
+            ...
+            score->setLayout(tick1);      // tick position of score change
+            ...
+            score->setLayout(tickn);      // another change at a different position
+            ...
+            score->endCmd();
+   setLayout(int tick) records the min+max value of all calls and feeds it
+   to score->doLayoutRange(int minTick, int maxTick);
+
+
+- Do not allow more than one System on a line. In 2.x a horizontal box splits
+  a line into two systems. In 3.x a horizontal box is handled as a special measure.
+  This simplifies page layout a lot.
+
+- System bar lines are moved into measures in a special segment type "BeginBarLine".
+
+- Do not undo/redo add/removal of "created" elements.
+      - It speeds up doLayout() and consumes less memory.
+
+      In 2.x all Segments changes must be on the undo/redo stack to keep the history
+      consistent, This was necessary as Segments were referring to
+      previous/next segments to find the proper insertion point.
+
+      In 3.x  Undo knows were to (re-)insert Segments by only checking type and tick
+      position.
+
+- evaluate the possibility of implementing "Continuous View" as a real "view" change
+  without changing the score (no undo/redo change)
+
+- move compatibility code into separate modules.
+
+
+====================================================================
+      New Features
+====================================================================
+
+Timewise insert/delete notes/rests
+-----------------------------------
+
+      - Ctrl+Shift+[cdefg]
+        Insert note with current duration.
+        This increases the duration of the actual measure independent of the
+        current time signature making it an irregular measure.
+
+      - Ctrl + left mouse button in note entry mode
+        Inserts note/rest with current duration
+
+      - Ctrl+Del
+        Removes the selected Chord/Rest decreasing the duration of the measure.
+        Extend this to selection ranges.
+
+      - drop barline
+        This inserts a barline into the current measure or changes the current barline.
+
+      - ctrl + drop barline
+        Splits the current measure at the new barline.
+
+      - ctrl + delete barline
+        This joins the current measure with the next measure.
+
+      - show irregular measures
+        This displays a "+" or "-" in the upper right corner of a measure if the measure
+        length is different from the current time signature.
+
+      Functions which may be removed:
+            - split measure: replaced by dropping a barline
+            - join measure:  replaced by deleting a barline
+            - adjusting the actual measure lenght in measure properties; this
+              can be achieved by inserting/deleting notes/rests in the measure.
+            - delete measure timewise: replaced by Ctrl+Del of selection ranges
+
+
+Palette handling
+-------------------------------
+      - shift+drag allows to move a palette element in the palette
+      - ctrl+drag is drag operation with special semantic
+
+
+====================================================================
+      Programming Style Changes in MuseScore 3
+====================================================================
+
+      * Instead of
+            if (e->type() == Element::Type::Chord)
+                  ...
+        write
+            if (e->isChord())
+                  ...
+
+        This is shorter and easier to read. Similar
+            if ((s.segmentType() == Segment::Type::ChordRest))
+                  ...
+        can be written as
+            if (s.isChordRestType())
+                  ...
+
+      * Use safer type conversion: instead of
+            Chord* chord = static_cast<Chord*>(e);
+
+        write
+            Chord* chord = toChord(e);
+
+        This adds an Q_ASSERT to make sure e is really a Chord().
+
+      * Prefer vector container over list:
+            - Instead of QList use QVector or even better std::vector if possible.
+
+      * Prefer stl style over Qt style when using container:
+            - use list.push_back(xx) instead of list.append(xx) or
+            - use list.empty() instead of list.isEmpty()
+            - etc.
+
+        (see https://marcmutz.wordpress.com/effective-qt/containers/)
+
+        Caution when replacing Qt container with stl container as the semantic
+        may be different. Especially in a "for (xxx : yyy)" loop the Qt container
+        is copied (copy on write) and the stl container not. That means that you can modify a
+        Qt container (inserting/deleting elements) in this for loop. This will usually not
+        work for a stl container.
+
+
+      * In iterating a SegmentList instead of
+            for (Segment* s = segments->first(); s; s = s->next())
+                  ...
+
+        you can write
+            for (Segment& s : segments)
+                  ...
+
+      * enums
+            To export enums for scripting we collect them in types.h and use the new
+            qt feature Q_NAMESPACE.
+
+      * debug messages
+            - use qWarning(), qCritical() and qFatal()
+            - if debug messages are used, it should be possible to switch them off and they
+              should be removed in release mode
+            - don't use qDebug(), instead use a log category and call qCDebug(logCategory, ...)
+              (see undo.h undo.cpp for example usage)
+              TODO: check if they can be removed in system mode
+
+
+====================================================================
+      some rules
+====================================================================
+
+Layout
+
+      - After loading a score, the score data can only be modified in a "undo" function during editing.
+        The score is "dirty" if there is an undo stack entry.
+
+      - Flags/data which describe what kind of relayout/update the score needs are collected in
+        Score->CmdState. They can only be set in an "undo" function.
+
+Score File
+
+      - "created" elements are not written out into the score file. For example bar lines are usually created
+        by layout. They are marked as created and therefore do not appear in the score file.
+
+      - Element properties are only written if they differ from their default value which usually is the
+        style value if they are styled.
+
+paint() method in Element
+      paint() should never paint something or not conditionally. If you watn something not to be
+      painted, then set the bounding box of the element to zero in layout() and paint will not
+      be called. This works better with smart layout and collision detection.
+
+====================================================================
+      Implementation Details
+====================================================================
+
+Measure layout
+      A measure is layouted in four different contexts:
+            - first measure in a system
+                  - the measure is prepended by a system header
+
+            - last measure in a system
+                  - the measure has a system trailer
+
+            - in the middle of a system
+
+            - is the only measure in a system
+                  - the measure has a system header and a system trailer
+
+BarLine handling
+
+      A measure can have four kind of barlines, contained in a special typed Segment:
+
+            - BeginBarLine
+                  this barline is also called the "systemic barline"
+                  - automatically created for every System
+                  - a BarLine can be dropped on a horizontal frame which adds
+                    a BeginBarLine to the next measure
+                  - overrides the EndBarLine of a previous measure in the system
+
+            - StartRepeatBarLine
+                  - after a horizontal frame it overrides a BeginBarLine
+                  - is prepended by a system header if in the first system measure
+                  - sets the _repeatStart measure flag
+
+            - BarLine
+                  - is in the middle of a measure and has no semantic (repeat etc.)
+                    (tick > start tick of measure and tick < end tick of measure)
+
+            - EndBarLine
+                  - is created automatically
+                  - maybe not the last Segment in a Measure (cautionary elements can follow)
+
+
+Ottava
+      Ottavas have no placement style. Placement depends on the ottava subtype and is hardcoded.
+
+Dynamics
+      Default vertical reference position for Placement "below" (dynamicPosBelow = 0.0) is the last
+      staff line + text line height.
+
+
+Styles & Properties
+      There is a connection between style values and property values as some properties
+      can be styled. The StyleIdx of a property style can be found by calling
+            StyleIdx Element::getPropertyStyle(P_ID)
+      If the property has no style, then StyleIDx::NOSTYLE is returned.
+
+      A property can have different style values depending on the element type.
+
+
+
+====================================================================
+      Known Issues
+====================================================================
+
+      * tablature not tested, has likely regressions
+
+      * some scripting interface functions are commented out
+
+      * horizontal layout mode is incomplete and does not work right
+
+      * only simple text editing will work, the current implementation is
+        incomplete
+
+
+
